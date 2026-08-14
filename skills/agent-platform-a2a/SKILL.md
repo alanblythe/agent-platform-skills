@@ -220,29 +220,40 @@ Add whatever the agent actually calls — e.g. `roles/run.invoker` on a Cloud Ru
 sub-agent — bound to the principal above, not to a service account. **An Agent Identity
 workload has no service account**, so a `serviceAccount:` member grants it nothing.
 
-### Outbound calls need an explicit scope
+### Outbound calls: get the credential right, then expect it to still fail
 
-A service account carries `cloud-platform` implicitly; an Agent Identity credential does
-not. Unscoped ADC yields a 401 that no grant will fix.
+Do both of these — they are correct regardless, and a service account was hiding their
+absence:
 
 ```python
+# A service account carries cloud-platform implicitly; an Agent Identity credential does not.
 credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-```
 
-Let the credential apply itself rather than lifting the token off it — this also removes
-any need to track expiry, which the library handles:
-
-```python
+# Let the credential apply itself. Lifting .token off it bypasses whatever binding the
+# credential type implements, and this hands expiry back to the library.
 creds.before_request(Request(), "POST", url, headers)   # not: creds.refresh(); creds.token
 ```
 
-Agent identity explicitly covers "access to other agents hosted on Agent Runtime using
-A2A", so this path is supported.
+> **Neither makes plain-HTTP A2A work under Agent Identity.** Measured on a live
+> deployment: with the principal confirmed from audit logs, `cloud-platform` scope
+> confirmed applied, `before_request` in use, and IAM bindings in place, calls to both
+> an Agent Runtime sub-agent and a Cloud Run sub-agent still returned **401**. The same
+> credential in the same process succeeded for `PredictionService.GenerateContent` and
+> `SessionService.AppendEvent` — via Google's client libraries.
+>
+> The difference is the transport, not the identity. Agent identities enforce
+> "end-to-end cryptographic authentication by using **mTLS and DPoP**"; DPoP binds the
+> token to a key the caller must prove possession of per request. ADK's
+> `RemoteA2aAgent` sends a plain bearer header over httpx and cannot produce that proof.
+>
+> The docs say agent identity covers "access to other agents hosted on Agent Runtime
+> using A2A" — read that as *via a binding-aware path*, i.e. **Agent Gateway**, which
+> exists precisely to handle the mTLS handshake for you.
 
-> **Cloud Run sub-agents are a separate credential.** Cloud Run wants an
-> audience-bound **ID token**, which ADC does not supply. With no service account to
-> mint one from, an Agent Identity workload may be unable to call a Cloud Run agent
-> directly — route it through Agent Gateway.
+**Consequence:** if an ADK orchestrator calls sub-agents over A2A, either attach it to
+an Agent Gateway or do not enable Agent Identity. Enabling Agent Identity alone will
+break every sub-agent call, and because resolution failure is silent (see above) the
+orchestrator will keep answering with invented data rather than erroring.
 
 ## Agent Gateway
 
@@ -267,7 +278,7 @@ for A2A without the caller implementing mTLS/DPoP.
 | A2UI renders as raw JSON text | Registered as ADK. Only `a2aAgentDefinition` negotiates A2UI. |
 | `CREDENTIALS_MISSING` on an A2A call to Agent Runtime | No Authorization with `cloud-platform` scope on the registration. |
 | `PERMISSION_DENIED` on `reasoningEngines.query` | The GE discoveryengine SA lacks query on the engine. Check the **GE app's** project number, not the agent's. |
-| 401 between agents, IAM looks correct | Missing `cloud-platform` scope, or a bound credential sent as a plain bearer token. |
+| 401 between agents, IAM looks correct | Missing `cloud-platform` scope, or — under Agent Identity — a DPoP/mTLS-bound credential sent as a plain bearer token. The latter is not fixable in the caller; use Agent Gateway or turn Agent Identity off. |
 | `Identity Pool does not exist` | Wrong Agent Identity trust domain for this project. |
 | Grant applied, behaviour unchanged | Inert binding — the principal form is not what authenticates. Read `principalSubject`. |
 | Agent answers confidently with invented data | A sub-agent failed to resolve. Check card fetches; `state: completed` proves nothing. |
