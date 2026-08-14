@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agent-platform-skills",
+  "version": "0.1.0",
+  "description": "Field notes for wiring agents together on Gemini Enterprise Agent Platform: ADK vs A2A registration, A2UI rendering, Agent Identity, and Agent Gateway.",
+  "author": { "name": "Alan Blythe" },
+  "homepage": "https://github.com/alanblythe/agent-platform-skills",
+  "repository": "https://github.com/alanblythe/agent-platform-skills",
+  "license": "Apache-2.0",
+  "keywords": [
+    "adk",
+    "a2a",
+    "a2ui",
+    "agent-identity",
+    "agent-gateway",
+    "gemini-enterprise",
+    "agent-platform",
+    "google-cloud"
+  ]
+}
