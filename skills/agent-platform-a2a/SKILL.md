@@ -12,7 +12,7 @@ description: >
 metadata:
   author: Alan Blythe
   license: Apache-2.0
-  version: 0.3.0
+  version: 0.4.0
   requires:
     bins:
       - gcloud
@@ -31,9 +31,11 @@ A 401 leaves no audit entry — `protoPayload.status.code=7` returns nothing,
 because nothing was denied. An empty denial query alongside a failing call
 indicates the wrong layer is being investigated.
 
-Under Agent Identity, sub-agent A2A calls fail 401 because the credential is
-mTLS/DPoP-bound while `RemoteA2aAgent` sends a bearer header. No combination of
-roles resolves this.
+Under Agent Identity, `RemoteA2aAgent` calls fail 401 because the credential is
+mTLS/DPoP-bound while it sends a bearer header. No combination of roles resolves
+this — **the transport must change**, not the IAM. Route the call through the
+genai client transport, or through Agent Gateway. See
+`agent-platform-architecture` for the transport matrix.
 
 ## 2. Measure the caller
 
@@ -162,10 +164,10 @@ credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cl
 creds.before_request(Request(), "POST", url, headers)     # not: refresh(); creds.token
 ```
 
-Both are correct regardless of identity mode, and neither enables A2A under
-Agent Identity — that requires Agent Gateway. Cloud Run targets need an
-audience-bound ID token, which ADC does not supply, so that remains a separate
-path.
+Both are correct regardless of identity mode, and neither makes a plain-bearer
+transport work under Agent Identity: that needs the genai client transport or
+Agent Gateway. Cloud Run targets need an audience-bound ID token, which an Agent
+Identity workload cannot mint at all.
 
 A token fetched once at import is its own defect: tokens last about an hour while
 a warm instance holds its clients far longer.
@@ -193,7 +195,8 @@ Terraform uses another.
 | A2UI renders as raw JSON | Registered as ADK; only `a2aAgentDefinition` negotiates A2UI |
 | `CREDENTIALS_MISSING` from GE | A2A on Agent Runtime without an Authorization carrying `cloud-platform` scope |
 | `PERMISSION_DENIED` on `reasoningEngines.query` | The Discovery Engine service agent of the **GE app's** project lacks query on the engine |
-| 401 between agents with correct IAM | Bound credential sent as a bearer token. Not fixable in the caller |
+| 401 between agents with correct IAM | Bound credential sent as a bearer token. Fix the transport, not the IAM |
+| `VERSION_NOT_SUPPORTED` on an A2A call | Missing `A2A-Version: 1.0` header; a missing version is read as `0.3` |
 | `Identity Pool does not exist` | Wrong Agent Identity trust domain for the project |
 | Grant applied, behaviour unchanged | Inert binding — that principal form is not what authenticates |
 | Confident answer containing invented data | A sub-agent failed to resolve; `state: completed` is not evidence |
