@@ -1,173 +1,141 @@
 ---
 name: agent-platform-a2a
 description: >
-  This skill should be used when the user wants to "connect two agents",
-  "call one agent from another", "set up A2A", "register an agent with
-  Gemini Enterprise", "make A2UI render in Gemini Enterprise", or is
-  debugging 401/403 errors between agents on Gemini Enterprise Agent
-  Platform. Covers ADK vs A2A registration, which one can render A2UI,
-  the authentication each path requires, Agent Identity principals and
-  scopes, Agent Gateway, and how to identify a caller from audit logs.
-  Do NOT use for writing agent code or for eval.
+  This skill should be used when debugging a deployment on Gemini Enterprise
+  Agent Platform: 401 or 403 between agents, "permission denied" on a reasoning
+  engine, "CREDENTIALS_MISSING", "Identity Pool does not exist", an IAM grant
+  that changes nothing, an agent answering confidently with invented data, or a
+  deploy failing on a permission the docs never mention. Covers how to identify
+  the real caller, why 401 and 403 need opposite responses, the Agent Identity
+  principal forms, and the traps that make a broken deployment look healthy.
+  Use agent-platform-architecture instead for choosing a design.
 metadata:
   author: Alan Blythe
   license: Apache-2.0
-  version: 0.1.0
+  version: 0.2.0
   requires:
     bins:
       - gcloud
-      - agents-cli
-    install: "uv tool install google-agents-cli"
 ---
 
-# ADK and A2A communication on Agent Platform
+# Debugging agent auth on Agent Platform
 
-Getting two agents to talk, or Gemini Enterprise (GE) to talk to one, fails in ways
-that look alike and are not. Read [Diagnose first](#diagnose-first) before changing
-any IAM, because the most common failure here is not an IAM problem at all.
+Almost every hour lost here goes to one of four mistakes: treating a 401 as a
+permissions problem, inferring the caller instead of measuring it, guessing at
+permissions instead of reading them out of the error, or believing a response
+that says it worked.
 
-## The one distinction that matters
+## 1. A 401 is not a 403
 
-| Code | Meaning | Fix |
+| Code | Meaning | Response |
 | :--- | :--- | :--- |
-| **403** `PERMISSION_DENIED` | The credential was accepted; the principal lacks the role. | An IAM grant. |
-| **401** `UNAUTHENTICATED` | The credential was rejected. No authorization decision happened. | Never an IAM grant. Wrong credential *type*, missing scope, or a binding-aware credential replayed as a plain bearer token. |
+| **403** `PERMISSION_DENIED` | Credential accepted, principal lacks the role | Grant something |
+| **401** `UNAUTHENTICATED` | Credential rejected. No authorization decision happened | **Never grant anything.** Wrong credential type, missing scope, or a bound credential sent as a plain bearer token |
 
-A 401 leaves **no audit entry** — `protoPayload.status.code=7` returns nothing, because
-nothing was denied. An empty denial query alongside a failing call is itself the signal
-that you are chasing the wrong layer.
+A 401 leaves **no audit entry** — `protoPayload.status.code=7` returns nothing,
+because nothing was denied. An empty denial query next to a failing call is
+itself the signal that you are working the wrong layer.
 
-## Diagnose first
+The most expensive version of this: under Agent Identity, sub-agent A2A calls
+fail 401 because the credential is mTLS/DPoP-bound and `RemoteA2aAgent` sends a
+bearer header. No combination of roles will ever fix it.
 
-Do not infer the caller from a resource field. Measure it.
+## 2. Measure the caller, never infer it
+
+`spec.effectiveIdentity` and the resource fields will mislead you. Read the
+principal the API actually authenticated.
 
 ```bash
-# 1. Turn on Data Access logging for the service (off by default).
+# Enable Data Access logging (off by default; bills by volume, turn it back off)
 gcloud projects get-iam-policy PROJECT --format=json > /tmp/p.json
 jq '.auditConfigs = [{"service":"aiplatform.googleapis.com",
       "auditLogConfigs":[{"logType":"ADMIN_READ"},{"logType":"DATA_READ"},{"logType":"DATA_WRITE"}]}]' \
   /tmp/p.json > /tmp/p2.json
 gcloud projects set-iam-policy PROJECT /tmp/p2.json     # preserves existing bindings
 
-# 2. Reproduce the call, then read who actually called.
+# Reproduce, then read who called
 gcloud logging read 'protoPayload.serviceName="aiplatform.googleapis.com"' \
   --project PROJECT --limit 5 --freshness=10m \
   --format="value(protoPayload.authenticationInfo.principalSubject,
                   protoPayload.methodName, protoPayload.status.code)"
 ```
 
-`principalSubject` is ground truth. Turn the audit config off again afterwards — Data
-Access logs bill by volume.
+`principalSubject` is ground truth. Everything else is a guess.
 
-## Gemini Enterprise → your agent
+### Agent Identity principal forms
 
-Two registration modes, and the choice is not cosmetic.
+Three exist, and granting the wrong one fails in two distinguishable ways:
 
-| | `adkAgentDefinition` | `a2aAgentDefinition` |
-| :--- | :--- | :--- |
-| GE invokes | `:streamQuery` on the reasoning engine | the `url` inside the agent card |
-| Carries a card | no — only `provisionedReasoningEngine` | yes — `jsonAgentCard` |
-| **Renders A2UI** | **no** | **yes** |
-| Auth, Agent Runtime | discoveryengine SA + `aiplatform.reasoningEngines.query` | an **Authorization with `cloud-platform` scope** |
-| Auth, Cloud Run | n/a (no reasoning engine) | discoveryengine SA + `roles/run.servicesInvoker` |
-| Agent Gateway applies | yes | **no** |
-
-### Why ADK registration cannot render A2UI
-
-GE learns an agent can render A2UI from the **A2UI extension in its agent card**
-(`https://a2ui.org/a2a-extension/a2ui/v0.8`). `adkAgentDefinition` has exactly one
-field — the reasoning engine resource — so there is no card, therefore no capability
-negotiation, therefore no reason for GE to look for surfaces. The agent's payload
-arrives as literal text in the reply.
-
-This is a protocol fact, not a bug to code around. Emitting the surface some other way
-does not help: adding a `Part(inline_data=Blob(mime_type="application/json+a2ui", …))`
-to the response was tested and changed nothing. Do not spend time on it.
-
-### The caller identity for ADK registration
-
-GE calls as the Discovery Engine service agent of the **GE app's** project, which is
-often a *different* project from the agent's:
+| Form | Notes |
+| :--- | :--- |
+| `agents.global.org-<ORG_ID>...` | documented for org'd projects; what `effectiveIdentity` reports |
+| `agents.global.proj-<PROJECT_NUMBER>...` | observed as the *authenticating* principal in some projects |
+| `agents.global.project-<PROJECT_NUMBER>...` | documented for orgless projects |
 
 ```
-service-<GE_PROJECT_NUMBER>@gcp-sa-discoveryengine.iam.gserviceaccount.com
+principal://<TRUST_DOMAIN>/resources/aiplatform/projects/<N>/locations/<REGION>/reasoningEngines/<ID>
 ```
 
-Grant it query access on the engine resource, not project-wide:
+- Wrong-but-existing trust domain ⇒ the binding is accepted and **inert**. Nothing authenticates as it; behaviour is unchanged.
+- Trust domain with no pool ⇒ `INVALID_ARGUMENT: Identity Pool does not exist`.
 
-```bash
-# Minimal role: aiplatform.reasoningEngines.query (+ .get). No predefined role is
-# narrower than roles/aiplatform.user, which carries hundreds of permissions.
-gcloud iam roles create geAgentCaller --project AGENT_PROJECT \
-  --title "Gemini Enterprise Agent Caller" \
-  --permissions aiplatform.reasoningEngines.query,aiplatform.reasoningEngines.get --stage GA
-```
+Neither is a permissions problem. Measure the form (§2) rather than copying one
+from a doc — including this one.
 
-Then bind it with `reasoningEngines/<ID>:setIamPolicy`.
+An Agent Identity workload has **no service account**, so a `serviceAccount:`
+member grants it nothing.
 
-### A2A registration on Agent Runtime
+## 3. Read permissions out of the error; never guess
 
-Supported, but it needs an OAuth Authorization — a plain registration gets
-`CREDENTIALS_MISSING`, because GE's A2A client presents an ID token while
-`aiplatform.googleapis.com` requires an OAuth access token.
-
-> If your A2A agent is hosted on Agent Runtime, you must create an authorization with
-> `cloud-platform` scope.
-
-The consequence is a per-user model: GE sends the **end user's** OAuth token, so every
-GE user needs `aiplatform.reasoningEngines.query` on the engine and must consent once.
-Attach it with `agents-cli publish gemini-enterprise --authorization-id …`.
-
-If per-user consent is unwanted, host on Cloud Run instead: GE then calls as the
-discoveryengine service agent with `roles/run.servicesInvoker`, no consent and no
-per-user IAM.
-
-### Registering
-
-Prefer the CLI over hand-rolled REST — it fetches the card and refuses to register one
-lacking the A2UI extension:
-
-```bash
-# A2A (Cloud Run / GKE)
-agents-cli publish gemini-enterprise \
-  --agent-card-url https://SERVICE.run.app/a2a/APP_NAME/.well-known/agent-card.json \
-  --gemini-enterprise-app-id projects/N/locations/global/collections/default_collection/engines/APP
-
-# ADK (Agent Runtime)
-agents-cli publish gemini-enterprise --registration-type adk \
-  --agent-runtime-id projects/N/locations/REGION/reasoningEngines/ID \
-  --gemini-enterprise-app-id projects/N/.../engines/APP
-```
-
-Registration is idempotent — re-running updates in place.
-
-## Agent → agent
-
-### The card path carries the ADK App name
-
-`attach_a2a_routes` mounts at `/a2a/{app.name}`, so an app named `luncher_agent` serves
-`/a2a/luncher_agent/.well-known/agent-card.json`, **not** `/a2a/app/…`. Scripts that
-hardcode `/a2a/app/` 404 against it, and the 404 looks exactly like a broken deployment.
-
-Agent Runtime also exposes a native A2A REST surface at `{a2a_url}/v1/card` and
-`/v1/message:send`, which is distinct from the ADK/a2a-SDK JSON-RPC routes above.
-
-### Sub-agent URLs are env vars derived from the agent name
-
-ADK's `RemoteA2aAgent` wiring typically reads `f"{agent_name.upper()}_URL"`. An agent
-named `scheduling_agent` reads `SCHEDULING_AGENT_URL`. **A name that does not match is
-ignored silently** and the agent falls back to its local default, so a deployed
-orchestrator quietly calls `localhost` and never says so. Verify from the logs:
+Deploys onto a network attachment fail one permission at a time, each only after
+the container builds. The 403 body **names the permission verbatim**:
 
 ```
-INFO:app.agent:Connecting 'scheduling_agent' using direct URL: https://…
+Required 'compute.regionOperations.get' permission for 'projects/.../operations/...'
 ```
 
-### Failure is silent — verify sub-agents, not task state
+and some errors name the role:
 
-When `RemoteA2aAgent` cannot resolve a sub-agent, the orchestrator does **not** fail.
-The model answers from nothing and returns `state: completed` with confident, fabricated
-content. Two 401s produce a plausible reply. Never treat `completed` as success:
+```
+Please make sure the Vertex AI service account has the dns.peer role
+```
+
+So: deploy → read the name → grant exactly that → wait for propagation → repeat.
+Adding permissions you *think* come next grants access nothing needs, and you
+never learn which were required.
+
+Two things that make this loop confusing:
+
+- **Consecutive failures look identical.** They name the same service account
+  and differ only in the method — `NetworkAttachmentsService.Get` then `.Patch`
+  then `RegionOperationsService.Get`. The second reads like the first grant not
+  having worked.
+- **IAM propagation takes minutes.** An immediate retry fails identically and
+  looks like the wrong role. Wait ~3 minutes before concluding anything.
+
+Observed set for deploying an Agent Runtime agent onto a customer-owned network
+attachment, granted to `service-<N>@gcp-sa-aiplatform` (**not** the `-re` service
+agent, which is the one everything else uses):
+
+```
+compute.networkAttachments.get       # NetworkAttachmentsService.Get
+compute.networkAttachments.update    # .Patch — accept-lists its own PSC connection
+compute.regionOperations.get         # polls the update it started
+roles/dns.peer                       # creating the DNS peering zone
+```
+
+`roles/compute.networkUser` is *not* sufficient: it carries `.get` but not
+`.update`.
+
+## 4. Do not trust a successful-looking response
+
+**A failed sub-agent does not fail the turn.** When `RemoteA2aAgent` cannot
+resolve a sub-agent, the model answers from nothing and the task reports
+`state: completed` with fluent, entirely invented content. Two 401s produce a
+confident, plausible answer. This is the single most dangerous behaviour here —
+it will convince you a broken deployment works.
+
+Verify from logs:
 
 ```bash
 gcloud logging read 'resource.labels.reasoning_engine_id="ID" AND
@@ -175,114 +143,74 @@ gcloud logging read 'resource.labels.reasoning_engine_id="ID" AND
   --project PROJECT --limit 6 --freshness=10m --format="value(textPayload)"
 ```
 
-## Agent Identity
+Both card fetches should be 200.
 
-`agents-cli deploy --agent-identity` (Preview) replaces the shared runtime service agent
-with a per-agent SPIFFE principal. There is **no `--no-agent-identity`**; a plain
-redeploy preserves it.
+Related traps:
 
-### Get the principal right
+- **Engine `state` lags.** It reports `ACTIVE` while an update is in flight, so a
+  state-based wait reads a stale config and reports success. Poll the returned
+  **operation** instead. A second PATCH during the window is rejected with "not
+  in ACTIVE state", so a naive retry loop fights itself.
+- **PATCH is async and slow** — it redeploys the container. A non-error response
+  means accepted, not applied.
+- **Sub-agent URL env vars are derived from the agent name** (`{AGENT_NAME}_URL`,
+  e.g. `SCHEDULING_AGENT_URL`). A name that does not match is **ignored
+  silently** and the agent falls back to localhost. A deployed orchestrator will
+  quietly call `localhost` forever. Confirm from the startup log line.
+- **Card paths carry the ADK `App` name**, not `app`: an app named
+  `luncher_agent` serves `/a2a/luncher_agent/.well-known/agent-card.json`.
+  Scripts that hardcode `/a2a/app/` 404, which looks like a broken deployment.
 
-The trust domain differs from what the resource reports, and both forms exist:
-
-| Form | Where it comes from |
-| :--- | :--- |
-| `agents.global.org-<ORG_ID>.system.id.goog` | documented for org'd projects; also what `spec.effectiveIdentity` reports |
-| `agents.global.proj-<PROJECT_NUMBER>.system.id.goog` | observed as the authenticating principal in some projects |
-| `agents.global.project-<PROJECT_NUMBER>.system.id.goog` | documented for orgless projects |
-
-```
-principal://<TRUST_DOMAIN>/resources/aiplatform/projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<ENGINE_ID>
-```
-
-Granting the wrong form fails in two distinguishable ways: an accepted-but-**inert**
-binding (the role is granted to a principal nothing authenticates as), or
-`INVALID_ARGUMENT: Identity Pool does not exist` when that trust domain has no pool in
-the project. Neither is a permissions problem. **Measure the form from the audit log**
-(see [Diagnose first](#diagnose-first)) rather than reading `spec.effectiveIdentity`.
-
-### It starts with no roles
-
-`--agent-identity` provisions the identity but grants **nothing**. The first failure is
-usually not the one you expect — every Google API call fails complaining about
-`serviceusage.serviceUsageConsumer`. The set `agents-cli` itself grants:
-
-```
-roles/aiplatform.user
-roles/serviceusage.serviceUsageConsumer
-roles/browser
-roles/cloudapiregistry.viewer
-roles/logging.logWriter
-roles/monitoring.metricWriter
-```
-
-Add whatever the agent actually calls — e.g. `roles/run.invoker` on a Cloud Run
-sub-agent — bound to the principal above, not to a service account. **An Agent Identity
-workload has no service account**, so a `serviceAccount:` member grants it nothing.
-
-### Outbound calls: get the credential right, then expect it to still fail
-
-Do both of these — they are correct regardless, and a service account was hiding their
-absence:
+## 5. Outbound credentials in agent code
 
 ```python
-# A service account carries cloud-platform implicitly; an Agent Identity credential does not.
+# Ask for the scope explicitly. A service account carries cloud-platform
+# implicitly; an Agent Identity credential does not, and unscoped ADC 401s.
 credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
-# Let the credential apply itself. Lifting .token off it bypasses whatever binding the
-# credential type implements, and this hands expiry back to the library.
-creds.before_request(Request(), "POST", url, headers)   # not: creds.refresh(); creds.token
+# Let the credential apply itself. Reading .token bypasses whatever binding the
+# credential implements, and hands expiry back to the library.
+creds.before_request(Request(), "POST", url, headers)     # not: refresh(); creds.token
 ```
 
-> **Neither makes plain-HTTP A2A work under Agent Identity.** Measured on a live
-> deployment: with the principal confirmed from audit logs, `cloud-platform` scope
-> confirmed applied, `before_request` in use, and IAM bindings in place, calls to both
-> an Agent Runtime sub-agent and a Cloud Run sub-agent still returned **401**. The same
-> credential in the same process succeeded for `PredictionService.GenerateContent` and
-> `SessionService.AppendEvent` — via Google's client libraries.
->
-> The difference is the transport, not the identity. Agent identities enforce
-> "end-to-end cryptographic authentication by using **mTLS and DPoP**"; DPoP binds the
-> token to a key the caller must prove possession of per request. ADK's
-> `RemoteA2aAgent` sends a plain bearer header over httpx and cannot produce that proof.
->
-> The docs say agent identity covers "access to other agents hosted on Agent Runtime
-> using A2A" — read that as *via a binding-aware path*, i.e. **Agent Gateway**, which
-> exists precisely to handle the mTLS handshake for you.
+Both are correct regardless of identity mode. **Neither rescues A2A under Agent
+Identity** — that needs Agent Gateway. Cloud Run targets need an audience-bound
+ID token, which ADC does not supply, so that stays a separate path.
 
-**Consequence:** if an ADK orchestrator calls sub-agents over A2A, either attach it to
-an Agent Gateway or do not enable Agent Identity. Enabling Agent Identity alone will
-break every sub-agent call, and because resolution failure is silent (see above) the
-orchestrator will keep answering with invented data rather than erroring.
+A pinned token is its own bug: tokens last ~1h, a warm instance holds its clients
+far longer, so anything fetched once at import starts 401ing after an hour.
 
-## Agent Gateway
+## 6. Running Terraform with the right credential
 
-The managed policy-enforcement point for ingress and egress, covering user↔agent,
-agent↔tool and agent↔agent. It "automatically handles mTLS handshakes and termination …
-without developer effort", which is what makes bound Agent Identity credentials usable
-for A2A without the caller implementing mTLS/DPoP.
+Go's auth library **ignores `CLOUDSDK_CONFIG`**. On a machine with several gcloud
+profiles, Terraform silently uses `~/.config/gcloud/application_default_credentials.json`
+— the wrong account — and fails with a 403 that reads like a missing role.
 
-- No `agents-cli` command yet — Console, REST, or Terraform
-  (`google_network_services_agent_gateway`, `google-beta`).
-- Needs `networkservices.googleapis.com` enabled.
-- Attach egress to an existing engine by patching
-  `spec.deploymentSpec.agentGatewayConfig.agentToAnywhereConfig`.
-- **Attaching does not change `identity_type`.** An engine not already on Agent Identity
-  must be redeployed; you cannot patch your way in.
-- A2A agents registered directly with GE bypass the gateway entirely.
+```bash
+export GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+```
 
-## Troubleshooting
+Pointing `GOOGLE_APPLICATION_CREDENTIALS` at the profile's ADC file is the
+obvious fix and does not work for Workspace accounts: the Go client rejects the
+stored credential with `invalid_rapt` and demands an interactive reauth a script
+cannot perform. Python's `google-auth` *does* respect `CLOUDSDK_CONFIG`, so a
+Python check reports the right identity while Terraform uses a different one —
+which makes this trap very hard to see.
+
+## Troubleshooting index
 
 | Symptom | Cause |
 | :--- | :--- |
-| A2UI renders as raw JSON text | Registered as ADK. Only `a2aAgentDefinition` negotiates A2UI. |
-| `CREDENTIALS_MISSING` on an A2A call to Agent Runtime | No Authorization with `cloud-platform` scope on the registration. |
-| `PERMISSION_DENIED` on `reasoningEngines.query` | The GE discoveryengine SA lacks query on the engine. Check the **GE app's** project number, not the agent's. |
-| 401 between agents, IAM looks correct | Missing `cloud-platform` scope, or — under Agent Identity — a DPoP/mTLS-bound credential sent as a plain bearer token. The latter is not fixable in the caller; use Agent Gateway or turn Agent Identity off. |
-| `Identity Pool does not exist` | Wrong Agent Identity trust domain for this project. |
-| Grant applied, behaviour unchanged | Inert binding — the principal form is not what authenticates. Read `principalSubject`. |
-| Agent answers confidently with invented data | A sub-agent failed to resolve. Check card fetches; `state: completed` proves nothing. |
-| Card URL 404s | Path carries the ADK `App` name, not `app`. |
+| A2UI renders as raw JSON | Registered as ADK. Only `a2aAgentDefinition` negotiates A2UI |
+| `CREDENTIALS_MISSING` from GE | A2A on Agent Runtime without an Authorization (`cloud-platform` scope) |
+| `PERMISSION_DENIED` on `reasoningEngines.query` | discoveryengine SA of the **GE app's** project lacks query on the engine |
+| 401 between agents, IAM correct | Bound credential as a bearer token. Not fixable in the caller — Agent Gateway, or no Agent Identity |
+| `Identity Pool does not exist` | Wrong Agent Identity trust domain for this project |
+| Grant applied, nothing changed | Inert binding — that principal form is not what authenticates. Read `principalSubject` |
+| Confident answer, invented data | A sub-agent failed to resolve. `state: completed` proves nothing |
+| `Cannot connect to ... mtls.googleapis.com` | Gateway attached without PSC networking |
+| Card URL 404s | Path carries the ADK `App` name, not `app` |
+| Deploy 403s on a compute permission | Grant the named permission to `service-<N>@gcp-sa-aiplatform`, wait 3 min |
 
 ## Sources
 
@@ -290,6 +218,5 @@ for A2A without the caller implementing mTLS/DPoP.
 - [Use an A2A agent](https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/use-an-a2a-agent)
 - [Register A2A agents with GE](https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-a2a-agent)
 - [Register ADK agents with GE](https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent)
-- [Register an A2UI agent](https://docs.cloud.google.com/gemini/enterprise/docs/a2ui-agents/register-and-manage-an-a2ui-agent)
 - [Agent Gateway overview](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview)
 - [Route traffic through Agent Gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/scale/runtime/agent-gateway-runtime-deploy)

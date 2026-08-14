@@ -13,7 +13,12 @@ recorded.
 
 | Skill | Use it for |
 | :--- | :--- |
-| [`agent-platform-a2a`](skills/agent-platform-a2a/SKILL.md) | Connecting agents to each other or to Gemini Enterprise: ADK vs A2A registration, A2UI rendering, Agent Identity principals and scopes, Agent Gateway, 401 vs 403. |
+| [`agent-platform-architecture`](skills/agent-platform-architecture/SKILL.md) | **Designing.** The platform constraints that govern how agents fit together, and the four architectures they permit. One agent or several, Agent Identity or not, whether you need Agent Gateway, how to expose an agent in Gemini Enterprise. |
+| [`agent-platform-a2a`](skills/agent-platform-a2a/SKILL.md) | **Debugging.** 401 vs 403, identifying the real caller from audit logs, Agent Identity principal forms, reading permissions out of errors, and the traps that make a broken deployment look healthy. |
+
+The split is design versus operations. The architecture skill is meant to read as
+a design document; the debugging skill holds the war stories that would otherwise
+crowd out the model.
 
 ## Install
 
