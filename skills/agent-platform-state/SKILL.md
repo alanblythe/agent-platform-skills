@@ -101,7 +101,7 @@ Rules, not preferences. `⇒` means the platform gives no choice.
 | S10 | Memory Bank has two read paths: `search_memory` issues `similarity_search_params`; `retrieve_profiles` is "a scope-keyed lookup, not a semantic query", returning structured profiles per registered schema | ⇒ there is no list-all over free-form memories; exact retrieval means profiles |
 | S11 | Memory Bank has two write paths: `add_memory` → `memories.create` **verbatim**; `add_session_to_memory` / `add_events_to_memory` → generate/IngestEvents, which **LLM-extracts** facts. `enable_consolidation` merges server-side | ⇒ the default path for session ingestion paraphrases; only `add_memory` preserves text as written |
 | S12 | Container filesystems on managed hosts are ephemeral, per-instance, and count against instance memory | ⇒ a file write is not persistence: lost on recycle, lost on scale-to-zero, invisible to sibling instances ⇒ concurrent readers can observe different values |
-| S13 | `GOOGLE_CLOUD_AGENT_ENGINE_ID` is injected by **Agent Runtime**, not by Cloud Run | ⇒ the standard "Agent Platform Sessions if set, in-memory otherwise" factory **silently degrades** on Cloud Run: identical code, no error, ephemeral sessions |
+| S13 | `GOOGLE_CLOUD_AGENT_ENGINE_ID` is injected by **Agent Runtime**, not by Cloud Run | ⇒ the standard "Agent Platform Sessions if set, in-memory otherwise" factory **silently degrades** on Cloud Run: identical code, no error, ephemeral sessions ⇒ not a dead end: an engine can be created with no code and pointed at, see `agent-platform-architecture` F15 |
 | S14 | `DatabaseSessionService` needs the `db` extra (SQLAlchemy) and builds via `create_async_engine`; dialects are `sqlite`, `mysql`, `postgresql` | ⇒ an async driver is required (`postgresql+asyncpg`, `mysql+aiomysql`, `sqlite+aiosqlite`), and the dependency is not present by default |
 | S15 | SQLite and in-memory backends live inside the instance | ⇒ they do not survive multi-instance scaling ⇒ "shared across users" implies a network database or a managed service, not a file |
 
@@ -160,7 +160,9 @@ was taken at startup — a fallback that never announces itself is
 indistinguishable from a configuration that worked.
 
 Set `SESSION_SERVICE_URI` explicitly on any host that does not inject the
-variable.
+variable, or create an engine for the agent and point at it — an engine needs no
+deployed code to hold Sessions and Memory Bank (`agent-platform-architecture`
+F15).
 
 ## Agent Platform Memory Bank
 

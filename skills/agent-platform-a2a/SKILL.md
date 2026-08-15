@@ -313,6 +313,33 @@ logger.warning("No region configured; the card cannot advertise a reachable URL"
 A hardcoded region also drifts silently: it stays correct until something is
 deployed elsewhere, and nothing rereads the comment explaining it.
 
+## 9. Service agents are created lazily
+
+A service agent does not exist until its API is first used, so a binding made
+before that is refused:
+
+```
+INVALID_ARGUMENT: Service account
+service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com
+does not exist.
+```
+
+On a new project this hits every grant to a service agent, and setup scripts
+routinely hide it -- `add-iam-policy-binding ... >/dev/null 2>&1 || true`
+reports success whatever happened, so the missing roles surface later as 403s
+during deployment with nothing tying them back. Never mask the result of a
+grant.
+
+Create the identity first, then bind:
+
+```bash
+gcloud beta services identity create --service=aiplatform.googleapis.com \
+  --project=PROJECT
+```
+
+Note which agent you need. `gcp-sa-aiplatform` and `gcp-sa-aiplatform-re` are
+different principals, and the runtime one is the `-re` form.
+
 ## Troubleshooting index
 
 | Symptom | Cause |
@@ -338,6 +365,8 @@ deployed elsewhere, and nothing rereads the comment explaining it.
 | `global-aiplatform.googleapis.com` does not resolve | The model endpoint value was interpolated into a regional host (§8) |
 | Agent reachable but sessions or memories are empty | Card or client built against the wrong region — resolves fine, wrong place (§8) |
 | Deploy 403s on a compute permission | Grant the named permission to `service-<PROJECT_NUMBER>@gcp-sa-aiplatform` and allow propagation |
+| `Service account service-…@gcp-sa-… does not exist` when granting | The API has not been used yet, so its service agent is absent. Create the identity first (§9) |
+| IAM script reports success, deploys still 403 | Bindings masked with `\|\| true`. Re-run without the mask and read what failed (§9) |
 
 ## Sources
 
