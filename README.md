@@ -13,12 +13,14 @@ behaviour disagree, both are recorded.
 
 | Skill | Use it for |
 | :--- | :--- |
-| [`agent-platform-architecture`](skills/agent-platform-architecture/SKILL.md) | **Designing.** The platform constraints that govern how agents fit together, and the four architectures they permit. One agent or several, Agent Identity or not, whether you need Agent Gateway, how to expose an agent in Gemini Enterprise. |
+| [`agent-platform-architecture`](skills/agent-platform-architecture/SKILL.md) | **Designing.** The platform constraints that govern how agents fit together, and the six architectures they permit. One agent or several, Agent Identity or not, whether you need Agent Gateway, how to expose an agent in Gemini Enterprise. |
 | [`agent-platform-a2a`](skills/agent-platform-a2a/SKILL.md) | **Debugging.** 401 vs 403, identifying the real caller from audit logs, Agent Identity principal forms, reading permissions out of errors, and the conditions under which a broken deployment reports success. |
+| [`agent-platform-state`](skills/agent-platform-state/SKILL.md) | **Persisting.** Where data lives and what survives: the three stores and their lifetimes, why `app:`-prefixed state does not scope on Agent Runtime, memory scopes and sharing a collection across users, and which store fits which workload. |
 
-The split is design versus operations, so that neither crowds out the other: the
-architecture skill states the constraints and the designs they permit, and the
-debugging skill covers failure modes and how to identify them.
+The split is design, operations, and state, so that none crowds out the others:
+the architecture skill states the constraints and the designs they permit, the
+debugging skill covers failure modes and how to identify them, and the state
+skill covers where data lives and what survives a restart.
 
 ## Install
 
