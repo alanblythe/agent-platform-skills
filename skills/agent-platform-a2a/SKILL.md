@@ -4,11 +4,12 @@ description: >
   This skill should be used when debugging a deployment on Gemini Enterprise
   Agent Platform: 401 or 403 between agents, "permission denied" on an Agent
   Runtime agent, "CREDENTIALS_MISSING", "Identity Pool does not exist", an IAM grant
-  that changes nothing, an agent answering confidently with invented data, or a
-  deploy failing on an undocumented permission. Covers identifying the real
-  caller, why 401 and 403 need opposite responses, Agent Identity principal
-  forms, and the conditions under which a broken deployment reports success.
-  Use agent-platform-architecture instead for choosing a design.
+  that changes nothing, an agent answering confidently with invented data, a
+  deploy failing on an undocumented permission, a 404 for a model that exists,
+  or a "global" vs regional location mix-up. Covers identifying the real caller,
+  why 401 and 403 need opposite responses, Agent Identity principal forms, which
+  region belongs where, and the conditions under which a broken deployment
+  reports success. Use agent-platform-architecture instead for choosing a design.
 metadata:
   author: Alan Blythe
   license: Apache-2.0
@@ -277,6 +278,41 @@ for Workspace accounts: the Go client rejects the stored credential with
 respect `CLOUDSDK_CONFIG`, so a Python check reports the intended identity while
 Terraform uses another.
 
+## 8. "Location" is three different values
+
+An agent carries several regions that are not interchangeable, and the failures
+are quiet: a wrong one either builds an invalid host or a valid host pointing at
+the wrong place.
+
+| Value | What it names | Typical |
+| :--- | :--- | :--- |
+| Model / GenAI location | Which endpoint serves the **model** | often `global` |
+| Deploy region | Where the service or engine **runs** | a real region |
+| Engine location | The region of the engine holding **sessions and Memory Bank** | a real region |
+
+Two rules follow:
+
+- **`global` is a model endpoint, not a region.** Some model versions are served
+  *only* from `global`, and a regional endpoint returns **404** for them — which
+  reads as a bad model name rather than a bad location. The reverse also holds:
+  interpolating `global` into a regional host yields
+  `global-aiplatform.googleapis.com`, which does not resolve.
+- **Never default a region.** A guessed region produces a URL that resolves and
+  is wrong — an agent card advertising a reachable host in the wrong region looks
+  like a working deploy. Resolve from config, and when nothing is set, decline to
+  build the URL and say so:
+
+```python
+# Engine region first, deploy region second, no fallback.
+location = os.getenv("AGENT_ENGINE_LOCATION") or os.getenv("CLOUD_LOCATION")
+if engine_id and project and location:
+    return f"https://{location}-aiplatform.googleapis.com/..."
+logger.warning("No region configured; the card cannot advertise a reachable URL")
+```
+
+A hardcoded region also drifts silently: it stays correct until something is
+deployed elsewhere, and nothing rereads the comment explaining it.
+
 ## Troubleshooting index
 
 | Symptom | Cause |
@@ -298,6 +334,9 @@ Terraform uses another.
 | `Cannot connect to ... mtls.googleapis.com` / `Name or service not known` | Engine on a PSC network whose private zone answers for `mtls.googleapis.com` but holds no records — gateway attached without networking, **or networking attached without a gateway**. Clear `pscInterfaceConfig` if the gateway is not being used |
 | Turn fails before any sub-agent is called | Look above the sub-agent lines: the runtime's own session call failed first, typically the mtls case above |
 | Card URL returns 404 | Path carries the ADK `App` name |
+| 404 for a model that exists | It is served only from the `global` endpoint; a regional one 404s (§8) |
+| `global-aiplatform.googleapis.com` does not resolve | The model endpoint value was interpolated into a regional host (§8) |
+| Agent reachable but sessions or memories are empty | Card or client built against the wrong region — resolves fine, wrong place (§8) |
 | Deploy 403s on a compute permission | Grant the named permission to `service-<PROJECT_NUMBER>@gcp-sa-aiplatform` and allow propagation |
 
 ## Sources
