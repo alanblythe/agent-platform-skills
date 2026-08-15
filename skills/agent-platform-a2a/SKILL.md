@@ -2,8 +2,8 @@
 name: agent-platform-a2a
 description: >
   This skill should be used when debugging a deployment on Gemini Enterprise
-  Agent Platform: 401 or 403 between agents, "permission denied" on a reasoning
-  engine, "CREDENTIALS_MISSING", "Identity Pool does not exist", an IAM grant
+  Agent Platform: 401 or 403 between agents, "permission denied" on an Agent
+  Runtime agent, "CREDENTIALS_MISSING", "Identity Pool does not exist", an IAM grant
   that changes nothing, an agent answering confidently with invented data, or a
   deploy failing on an undocumented permission. Covers identifying the real
   caller, why 401 and 403 need opposite responses, Agent Identity principal
@@ -12,13 +12,24 @@ description: >
 metadata:
   author: Alan Blythe
   license: Apache-2.0
-  version: 0.4.0
+  version: 0.8.0
   requires:
     bins:
       - gcloud
 ---
 
 # Debugging agent auth on Agent Platform
+
+Named services of Gemini Enterprise Agent Platform referenced below:
+**Agent Runtime** (managed host), **Agent Identity**, **Agent Gateway**, and
+**Agent Registry**. Cloud Run is a separate Google Cloud product used as the
+alternative host. For **Sessions** and **Memory Bank**, see
+`agent-platform-state`.
+
+"Engine" is the API-level noun for a deployed Agent Runtime agent — the REST
+resource is `reasoningEngines`, and IAM permissions
+(`aiplatform.reasoningEngines.query`) and log fields (`reasoning_engine_id`)
+keep that spelling.
 
 ## 1. A 401 is not a 403
 
@@ -30,6 +41,18 @@ metadata:
 A 401 leaves no audit entry — `protoPayload.status.code=7` returns nothing,
 because nothing was denied. An empty denial query alongside a failing call
 indicates the wrong layer is being investigated.
+
+### Two 401s that mean different things
+
+The body distinguishes them, and they have different fixes. Read the wording
+before acting:
+
+| Body says | Reason | Meaning | Fix |
+| :--- | :--- | :--- | :--- |
+| "Request is **missing** required authentication credential" | `CREDENTIALS_MISSING` | Nothing was sent | The *caller* has no credential configured — e.g. a GE A2A registration with no `authorizationConfig` |
+| "Request had **invalid** authentication credentials" | `UNAUTHENTICATED` | Something was sent and rejected | A bound credential presented over plain HTTP. Use a client library so it goes over mTLS |
+
+"Missing" points at configuration, "invalid" at transport. Neither points at IAM.
 
 Under Agent Identity, `RemoteA2aAgent` calls fail 401 because the credential is
 mTLS/DPoP-bound while it sends a bearer header. No combination of roles resolves
@@ -61,8 +84,15 @@ gcloud logging read 'protoPayload.serviceName="aiplatform.googleapis.com"' \
 ### Agent Identity principal forms
 
 ```
+# Agent Runtime engine
 principal://<TRUST_DOMAIN>/resources/aiplatform/projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<ENGINE_ID>
+
+# Cloud Run service running under Agent Identity
+principal://<TRUST_DOMAIN>/resources/run/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE>
 ```
+
+On Cloud Run, `serviceAccountName` still shows a service account after the
+switch and is not what authenticates. Read the principal from the audit log.
 
 | Trust domain | Notes |
 | :--- | :--- |
@@ -152,7 +182,38 @@ Related conditions:
   hardcode `/a2a/app/` return 404 against an app named otherwise, which
   resembles a broken deployment.
 
-## 5. Outbound credentials in agent code
+## 5. Isolating where a header is lost
+
+A protocol that depends on headers has three places to fail, and they are
+indistinguishable from the client — all three look like "the feature is off".
+Log the middle one and probe the last one rather than guessing:
+
+```python
+# In the executor: did the request header arrive, and did we act on it?
+logger.info("extension: requested=%s activated=%s",
+            sorted(context.requested_extensions), activated)
+```
+
+```python
+# In middleware: does *any* app-set response header survive the hop?
+@app.middleware("http")
+async def _probe(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Probe"] = "container"
+    return response
+```
+
+| Observation | Conclusion |
+| :--- | :--- |
+| `requested=[]` | The request header never arrived — the caller or an intermediary dropped it |
+| `requested=[…] activated=None` | Arrived but was rejected — usually a URI the agent card does not advertise |
+| `activated=…` but the client sees nothing, **and** `X-Probe` is missing | The hop strips response headers. Not a code bug |
+| `activated=…`, `X-Probe` arrives, echo missing | A genuine server-side bug worth chasing |
+
+On Agent Runtime the third row is the answer: only Google frontend headers reach
+the caller. See `agent-platform-architecture` F12.
+
+## 6. Outbound credentials in agent code
 
 ```python
 # Request the scope explicitly. A service account carries cloud-platform
@@ -165,14 +226,42 @@ creds.before_request(Request(), "POST", url, headers)     # not: refresh(); cred
 ```
 
 Both are correct regardless of identity mode, and neither makes a plain-bearer
-transport work under Agent Identity: that needs the genai client transport or
-Agent Gateway. Cloud Run targets need an audience-bound ID token, which an Agent
-Identity workload cannot mint at all.
+transport work under Agent Identity: that needs the genai client transport
+(Architecture D) or Agent Gateway (E).
 
 A token fetched once at import is its own defect: tokens last about an hour while
 a warm instance holds its clients far longer.
 
-## 6. Running Terraform with the intended credential
+### Reaching Cloud Run under Agent Identity
+
+The runtime cannot mint an audience-bound ID token as itself. The metadata server
+**returns 200** for `identity?audience=…`, which reads like success — but Cloud
+Run rejects the result 401. Do not treat that 200 as evidence; only the receiving
+service's status code settles it.
+
+Mint as a delegate service account instead (Architecture F):
+
+```python
+from google.cloud import iam_credentials_v1     # NOT a hand-built POST — see below
+
+token = iam_credentials_v1.IAMCredentialsClient(credentials=creds).generate_id_token(
+    name=f"projects/-/serviceAccounts/{DELEGATE_SA}",
+    audience=CLOUD_RUN_SERVICE_URL,             # service root, not the request path
+    include_email=True,
+).token
+```
+
+Requires `roles/iam.serviceAccountOpenIdTokenCreator` for the agent's
+`principal://…` on the delegate, and `roles/run.invoker` for the delegate on the
+target.
+
+**The same 401 lies in wait here.** Calling `iamcredentials.googleapis.com` with a
+hand-built request and an `Authorization` header fails
+`UNAUTHENTICATED: Request had invalid authentication credentials` — the binding
+applies to *every* Google API call, not only agent-to-agent ones. This is the
+original 401 in a new place, and the fix is the same: use the generated client.
+
+## 7. Running Terraform with the intended credential
 
 Go's auth library ignores `CLOUDSDK_CONFIG`. On a machine with multiple gcloud
 profiles, Terraform uses `~/.config/gcloud/application_default_credentials.json`
@@ -193,14 +282,21 @@ Terraform uses another.
 | Symptom | Cause |
 | :--- | :--- |
 | A2UI renders as raw JSON | Registered as ADK; only `a2aAgentDefinition` negotiates A2UI |
-| `CREDENTIALS_MISSING` from GE | A2A on Agent Runtime without an Authorization carrying `cloud-platform` scope |
+| A2UI reply is **blank** — no text, no error | The `X-A2A-Extensions` echo never reached the client, so the surface was discarded. On Agent Runtime the passthrough strips it and no code fixes it; host on Cloud Run |
+| 403 on everything right after switching a service to `agent-identity` | The new principal holds no roles. Cloud Run agent identities get **no defaults**; re-grant what the service account had |
+| A response header the app sets never arrives | Agent Runtime's `/api/` passthrough replaces response headers wholesale. Confirm by setting a throwaway header in middleware — if that vanishes too, it is the proxy, not your code |
+| `CREDENTIALS_MISSING` from GE | A2A on Agent Runtime without an Authorization carrying `cloud-platform` scope. Set `authorizationConfig.agentAuthorization` on the agent |
 | `PERMISSION_DENIED` on `reasoningEngines.query` | The Discovery Engine service agent of the **GE app's** project lacks query on the engine |
 | 401 between agents with correct IAM | Bound credential sent as a bearer token. Fix the transport, not the IAM |
+| 401 "invalid authentication credentials" from any `*.googleapis.com` | Bound credential sent over plain HTTP. Use the generated client library |
+| 401 from Cloud Run despite `run.invoker` on the agent | Agent Identity cannot mint its own audience-bound ID token. Delegate SA (Architecture F) |
+| Metadata server returns 200 but the call still 401s | The 200 is not a usable ID token under Agent Identity |
 | `VERSION_NOT_SUPPORTED` on an A2A call | Missing `A2A-Version: 1.0` header; a missing version is read as `0.3` |
 | `Identity Pool does not exist` | Wrong Agent Identity trust domain for the project |
 | Grant applied, behaviour unchanged | Inert binding — that principal form is not what authenticates |
 | Confident answer containing invented data | A sub-agent failed to resolve; `state: completed` is not evidence |
-| `Cannot connect to ... mtls.googleapis.com` | Gateway attached without PSC networking |
+| `Cannot connect to ... mtls.googleapis.com` / `Name or service not known` | Engine on a PSC network whose private zone answers for `mtls.googleapis.com` but holds no records — gateway attached without networking, **or networking attached without a gateway**. Clear `pscInterfaceConfig` if the gateway is not being used |
+| Turn fails before any sub-agent is called | Look above the sub-agent lines: the runtime's own session call failed first, typically the mtls case above |
 | Card URL returns 404 | Path carries the ADK `App` name |
 | Deploy 403s on a compute permission | Grant the named permission to `service-<PROJECT_NUMBER>@gcp-sa-aiplatform` and allow propagation |
 
