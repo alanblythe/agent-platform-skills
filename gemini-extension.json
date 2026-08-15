@@ -1,5 +1,5 @@
 {
   "name": "agent-platform-skills",
   "version": "0.1.0",
-  "description": "Field notes for wiring agents together on Gemini Enterprise Agent Platform: ADK vs A2A registration, A2UI rendering, Agent Identity, and Agent Gateway."
+  "description": "Field notes for building on Gemini Enterprise Agent Platform: ADK vs A2A registration, A2UI rendering, Agent Identity, Agent Gateway, and where state lives across Sessions and Memory Bank."
 }

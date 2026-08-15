@@ -1,9 +1,10 @@
 # agent-platform-skills
 
-Skills for wiring agents together on **Gemini Enterprise Agent Platform** — the parts
-that are easy to get wrong and slow to diagnose: which registration mode can render
-A2UI, what authenticates on each path, how Agent Identity changes outbound calls, and
-how to tell a rejected credential from a missing permission.
+Skills for building on **Gemini Enterprise Agent Platform** — the parts that are easy
+to get wrong and slow to diagnose: which registration mode can render A2UI, what
+authenticates on each path, how Agent Identity changes outbound calls, how to tell a
+rejected credential from a missing permission, and which store actually keeps data
+across restarts and users.
 
 Derived from running deployments. Where a claim was verified by observation rather
 than taken from documentation, the skill marks it; where documentation and observed
