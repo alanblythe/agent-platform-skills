@@ -13,7 +13,7 @@ description: >
 metadata:
   author: Alan Blythe
   license: Apache-2.0
-  version: 0.8.0
+  version: 0.8.1
   requires:
     bins:
       - gcloud
@@ -181,7 +181,16 @@ Related conditions:
   `localhost` indefinitely. Confirm from the startup log line.
 - **Card paths carry the ADK `App` name**, not the literal `app`. Scripts that
   hardcode `/a2a/app/` return 404 against an app named otherwise, which
-  resembles a broken deployment.
+  resembles a broken deployment. The ADK REST path takes a *different* name
+  again — see `agent-platform-implementation` I2.
+
+**A sub-agent that succeeds can produce the same symptom.** Everything above
+assumes the invented content follows a failed call. It also follows a **200**:
+only the sub-agent's rendered text crosses the hop, so a fact it looked up but
+did not state does not reach the caller, which fills the gap fluently. If both
+card fetches return 200 and the answer is still invented, stop looking for an
+auth fault and compare what the sub-agent *said* against what the caller needed
+— see `agent-platform-implementation` I3.
 
 ## 5. Isolating where a header is lost
 

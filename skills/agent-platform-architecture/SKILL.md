@@ -13,7 +13,7 @@ description: >
 metadata:
   author: Alan Blythe
   license: Apache-2.0
-  version: 0.8.0
+  version: 0.8.1
 ---
 
 # Agent architecture on Agent Platform
@@ -414,6 +414,11 @@ class _A2uiActivatingExecutor(A2aAgentExecutor):
         try_activate_a2ui_extension(context, agent_card)   # sets the echo
         await super().execute(context, event_queue)
 ```
+
+Converting the emitted parts is a separate step from activating the extension,
+and ADK dispatches to **one of two executors per request** — so a converter
+attached to only one of them works under `curl` and not under Gemini
+Enterprise. See `agent-platform-implementation` I1.
 
 ### Wiring the Authorization
 
