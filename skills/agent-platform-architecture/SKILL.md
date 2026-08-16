@@ -464,7 +464,7 @@ the agent needs `aiplatform.reasoningEngines.query` on it.
 | :--- | :--- |
 | A2UI over `adkAgentDefinition` | Surface arrives as raw JSON text. Emitting it as an `inline_data` blob instead changes nothing — GE does not look for a capability it was never offered |
 | A2UI over `a2aAgentDefinition` **on Agent Runtime** | Blank reply, no error. The `/api/` passthrough strips the `X-A2A-Extensions` echo, so the client may not interpret the surface (F12). Host on Cloud Run — no code change fixes this |
-| Debugging that blank reply by validating the A2UI payload | Wasted effort. Correct v0.8 extension URI, standard catalog, valid components and a `state: completed` task all coexist with rendering nothing — the negotiation fails, not the payload |
+| Debugging that blank reply by validating the A2UI payload | Wasted effort. Correct v0.8 extension URI, standard catalog, valid components and a `state: completed` task all coexist with rendering nothing — the negotiation fails, not the payload. Note the converse once negotiation works: a valid catalog component can still be dropped, because GE implements a subset — see `agent-platform-implementation` I12 |
 | `RemoteA2aAgent` under Agent Identity | 401 on every call, with correct principal, scope and IAM. Change the transport (D) or add a gateway (E) |
 | Fixing that 401 with IAM | Impossible. A 401 is a rejected credential, not a denied permission; there is no authorization decision to grant |
 | Cloud Run target on the agent's **own** credential | The MDS `identity?audience=` endpoint returns 200 but not a token Cloud Run accepts, and the agent's access token is rejected too. Mint as a delegate SA instead (F) |
