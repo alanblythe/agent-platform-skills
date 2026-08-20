@@ -349,6 +349,31 @@ gcloud beta services identity create --service=aiplatform.googleapis.com \
 Note which agent you need. `gcp-sa-aiplatform` and `gcp-sa-aiplatform-re` are
 different principals, and the runtime one is the `-re` form.
 
+### `-re` cannot be pre-created
+
+The command above mints **`gcp-sa-aiplatform`**, not `gcp-sa-aiplatform-re`:
+
+```
+Service identity created: service-<NUM>@gcp-sa-aiplatform.iam.gserviceaccount.com
+```
+
+There is no service name that mints the `-re` agent. `aiplatform` is the only
+one that resolves; `reasoningengine.googleapis.com` and
+`aiplatform-re.googleapis.com` both fail with
+`SERVICE_CONFIG_NOT_FOUND_OR_PERMISSION_DENIED`.
+
+**`gcp-sa-aiplatform-re` appears when the first Agent Runtime deploy runs.**
+On a fresh project it does not exist before that, so running
+`services identity create` and then binding to `-re` still fails with
+`does not exist` — the remedy for the `gcp-sa-aiplatform` case does not
+transfer.
+
+This constrains ordering. Anything granting to `-re` must run **after** a first
+deploy has created it, so provisioning that binds `-re` up front cannot be a
+single pass on a new project. Either deploy once and then apply the grants, or
+make the binding tolerate the principal's absence on the first pass and
+converge on a later one — but do that explicitly, never by masking the error.
+
 ## Troubleshooting index
 
 | Symptom | Cause |
@@ -375,6 +400,7 @@ different principals, and the runtime one is the `-re` form.
 | Agent reachable but sessions or memories are empty | Card or client built against the wrong region — resolves fine, wrong place (§8) |
 | Deploy 403s on a compute permission | Grant the named permission to `service-<PROJECT_NUMBER>@gcp-sa-aiplatform` and allow propagation |
 | `Service account service-…@gcp-sa-… does not exist` when granting | The API has not been used yet, so its service agent is absent. Create the identity first (§9) |
+| `does not exist` when granting to `gcp-sa-aiplatform-re` specifically | The `-re` agent cannot be pre-created; it appears only after the first Agent Runtime deploy |
 | IAM script reports success, deploys still 403 | Bindings masked with `\|\| true`. Re-run without the mask and read what failed (§9) |
 
 ## Sources
