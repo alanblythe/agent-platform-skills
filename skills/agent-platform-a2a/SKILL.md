@@ -242,6 +242,33 @@ transport work under Agent Identity: that needs the genai client transport
 A token fetched once at import is its own defect: tokens last about an hour while
 a warm instance holds its clients far longer.
 
+### Calling a plain Google service — Secret Manager, Storage, BigQuery
+
+The rule above is not about agent-to-agent traffic. **Every** Google API the
+agent calls goes through the same binding, so an agent reading a secret is the
+same problem wearing different clothes:
+
+```python
+from google.cloud import secretmanager          # generated client, not requests/httpx
+
+creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+client = secretmanager.SecretManagerServiceClient(credentials=creds)
+value = client.access_secret_version(name=f"projects/{P}/secrets/{S}/versions/latest")
+```
+
+The two ways this fails are both easy to write by accident and neither looks
+like an auth mistake:
+
+- `google.auth.default()` **without scopes** — fine as a service account, 401 as
+  an Agent Identity.
+- a `requests`/`httpx` call to `secretmanager.googleapis.com` carrying
+  `Authorization: Bearer <creds.token>` — the credential is bound, and sending
+  it as a plain bearer strips the binding.
+
+Code that worked under a service account and 401s after switching to Agent
+Identity is almost always one of those two, not a missing role. Check the
+transport before touching IAM.
+
 ### Reaching Cloud Run under Agent Identity
 
 The runtime cannot mint an audience-bound ID token as itself. The metadata server
@@ -461,6 +488,33 @@ only a `Dockerfile` — and then `ignore_changes` on
 CI deploy of the real code is never reverted. The placeholder must use
 `source_code_spec`, not `container_spec`: the real deploy writes the former, and
 a `container_spec` placeholder is left beside it and rejected on update.
+
+### Granting an agent identity on a resource
+
+Project-level grants take the principal directly. A **resource**-level grant —
+a secret, a bucket, a table — takes one of two member forms, both accepted:
+
+| Member | Covers | Needs the engine to exist? |
+| :--- | :--- | :--- |
+| `principal://agents.global.org-<ORG>.system.id.goog/resources/aiplatform/projects/<NUM>/locations/<REGION>/reasoningEngines/<ID>` | that one engine | **Yes** — the id is in the string |
+| `principalSet://agents.global.org-<ORG>.system.id.goog/attribute.platformContainer/aiplatform/projects/<NUM>` | every agent in the project | **No** |
+
+The `principalSet` form is the same one the platform binds
+`roles/aiplatform.agentDefaultAccess` to at create time.
+
+That difference decides provisioning order. A per-engine grant cannot be
+written before the engine exists, so either provision the engine first (a
+sourceless create is enough, §9) or grant the set. Prefer the per-engine
+principal where several agents share a project and the resource is not meant
+to be common to them; prefer the set where there is one agent and you want the
+grant to precede it.
+
+**Neither is implied by the defaults.** `aiplatform.agentDefaultAccess` covers
+`aiplatform.endpoints.predict`, `serviceusage.services.use`,
+`resourcemanager.projects.get`, the `cloudapiregistry` read permissions, and
+logging, monitoring and trace writes. Secret Manager, Storage and BigQuery are
+not in it, so anything the agent reads outside Agent Platform needs a grant
+written by hand.
 
 **Grant `effectiveIdentity` verbatim.** On an organization-owned project the
 field reports the **`org-`** trust domain, and that is the form IAM accepts —
