@@ -95,6 +95,20 @@ principal://<TRUST_DOMAIN>/resources/run/projects/<PROJECT_NUMBER>/locations/<RE
 On Cloud Run, `serviceAccountName` still shows a service account after the
 switch and is not what authenticates. Read the principal from the audit log.
 
+**On Agent Runtime the metadata server does the same thing.** From inside an
+engine running under Agent Identity, `instance/service-accounts/default/email`
+returns **200** with a Google-internal tenant account:
+
+```
+z<hex>-tp@appspot.gserviceaccount.com
+```
+
+That is neither the agent identity nor `gcp-sa-aiplatform-re`, and
+`google.auth.default()` reports `service_account_email=default` beside it. So
+neither the MDS nor the credential object will tell you which principal your
+calls authenticate as. `spec.effectiveIdentity` on the engine is the answer;
+everything reported from inside the container is not.
+
 | Trust domain | Notes |
 | :--- | :--- |
 | `agents.global.org-<ORG_ID>.system.id.goog` | documented for projects in an organization; also what `effectiveIdentity` reports |
@@ -175,6 +189,11 @@ Related conditions:
   "not in ACTIVE state", so a retry loop conflicts with itself.
 - **PATCH is asynchronous** and redeploys the container. A non-error response
   means accepted, not applied.
+- **`agents-cli` prints the wrong identity on a successful `--agent-identity`
+  deploy.** The summary reads
+  `Service Account: service-<NUM>@gcp-sa-aiplatform-re.iam.gserviceaccount.com`
+  even when the engine's own `spec.effectiveIdentity` is a `principal://` and
+  `identityType` is `AGENT_IDENTITY`. Read the spec, not the summary.
 - **Sub-agent URL variables are derived from the sub-agent name**, typically
   `{AGENT_NAME}_URL`. A name that does not match is ignored silently and the
   agent falls back to its local default, so a deployed orchestrator calls
@@ -466,6 +485,13 @@ or break it:
 - **`identityType` must be set.** A create with only `displayName` and no spec
   is accepted but does not give you an identity.
 
+**Pre-minting couples you to the display name.** `agents-cli` decides whether
+to mint by listing engines and matching on `display_name`, so a deploy reuses
+an engine you created earlier only if the names agree — otherwise it creates a
+second engine, with a second identity, and any grant you wrote against the
+first is pointing at the wrong principal while everything reports success. The
+name is the manifest's project name unless `--service-name` overrides it.
+
 `agents-cli`'s `setup_agent_identity` (`deploy/agent_runtime.py`) is this
 pattern, and it then grants six roles to the new principal —
 `aiplatform.user`, `serviceusage.serviceUsageConsumer`, `browser`,
@@ -504,7 +530,10 @@ a `container_spec` placeholder is left beside it and rejected on update.
 ### Granting an agent identity on a resource
 
 Project-level grants take the principal directly. A **resource**-level grant —
-a secret, a bucket, a table — takes one of two member forms, both accepted:
+a secret, a bucket, a table — takes one of two member forms. Both were
+confirmed by an agent under Agent Identity actually reading a Secret Manager
+secret granted each way, with the secret's bindings stripped first so the
+ungranted case was a real baseline (403 with no grant, reads with either):
 
 | Member | Covers | Needs the engine to exist? |
 | :--- | :--- | :--- |
