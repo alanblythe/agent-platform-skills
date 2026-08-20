@@ -430,10 +430,20 @@ or break it:
 `agents-cli`'s `setup_agent_identity` (`deploy/agent_runtime.py`) is this
 pattern, and it then grants six roles to the new principal —
 `aiplatform.user`, `serviceusage.serviceUsageConsumer`, `browser`,
-`cloudapiregistry.viewer`, `logging.logWriter`, `monitoring.metricWriter` —
-because **a fresh Agent Identity holds no roles at all**. The first failure is
-otherwise `serviceusage.serviceUsageConsumer`, which breaks *every* Google API
-call rather than the one you were testing.
+`cloudapiregistry.viewer`, `logging.logWriter`, `monitoring.metricWriter`. The
+one that matters most is `serviceusage.serviceUsageConsumer`, whose absence
+breaks *every* Google API call rather than the one you were testing.
+
+A fresh Agent Identity is not entirely roleless. The create adds, by itself, a
+project-wide `principalSet` covering every agent in the project:
+
+```
+roles/aiplatform.agentDefaultAccess ->
+  principalSet://agents.global.org-<ORG>.system.id.goog/attribute.platformContainer/aiplatform/projects/<NUM>
+```
+
+That default is Agent Runtime's. A Cloud Run workload asserting an agent
+identity receives nothing implicitly.
 
 The same trick is how a **Cloud Run**-hosted agent gets an agent identity: mint
 it with a sourceless Agent Runtime create, grant it, and let the Cloud Run
