@@ -227,7 +227,8 @@ the caller. See `agent-platform-architecture` F12.
 
 ```python
 # Request the scope explicitly. A service account carries cloud-platform
-# implicitly; an Agent Identity credential does not, and unscoped ADC returns 401.
+# implicitly; an Agent Identity credential does not, and anything that does not
+# declare its own scopes then fails 401.
 credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
 # Let the credential apply itself. Reading .token bypasses whatever binding the
@@ -256,18 +257,29 @@ client = secretmanager.SecretManagerServiceClient(credentials=creds)
 value = client.access_secret_version(name=f"projects/{P}/secrets/{S}/versions/latest")
 ```
 
-The two ways this fails are both easy to write by accident and neither looks
-like an auth mistake:
+Measured against a secret an Agent Identity was granted on, reading it three
+ways in one invocation:
 
-- `google.auth.default()` **without scopes** — fine as a service account, 401 as
-  an Agent Identity.
-- a `requests`/`httpx` call to `secretmanager.googleapis.com` carrying
-  `Authorization: Bearer <creds.token>` — the credential is bound, and sending
-  it as a plain bearer strips the binding.
+| Call shape | Granted | Not granted |
+| :--- | :--- | :--- |
+| Generated client, ADC scoped to `cloud-platform` | **reads it** | 403 |
+| Generated client, **unscoped** ADC | **reads it** | 403 |
+| `requests` with `Authorization: Bearer creds.token` | **401** | 401 |
+
+**The bearer call fails 401 even when that same identity is fully authorized**,
+which is the whole point: a bound credential sent as a plain bearer is not a
+weaker credential, it is the wrong kind. No grant fixes it, and the 401 tells
+you so — 403 is what an authorization problem looks like here.
+
+A generated client works either way, because `google-cloud-*` clients declare
+their own default scopes and apply them to a scope-less credential. Scope
+explicitly anyway: anything that does *not* declare scopes — `AuthorizedSession`,
+a hand-rolled transport, a client you pass pre-built credentials to — has
+nothing to fall back on.
 
 Code that worked under a service account and 401s after switching to Agent
-Identity is almost always one of those two, not a missing role. Check the
-transport before touching IAM.
+Identity is a transport problem, not a missing role. Check how the call is made
+before touching IAM.
 
 ### Reaching Cloud Run under Agent Identity
 
