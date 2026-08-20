@@ -324,8 +324,8 @@ deployed elsewhere, and nothing rereads the comment explaining it.
 
 ## 9. Service agents are created lazily
 
-A service agent does not exist until its API is first used, so a binding made
-before that is refused:
+A service agent does not exist until the service is first used, so a binding
+made before that is refused:
 
 ```
 INVALID_ARGUMENT: Service account
@@ -339,53 +339,75 @@ reports success whatever happened, so the missing roles surface later as 403s
 during deployment with nothing tying them back. Never mask the result of a
 grant.
 
-Create the identity first, then bind:
-
-```bash
-gcloud beta services identity create --service=aiplatform.googleapis.com \
-  --project=PROJECT
-```
-
 Note which agent you need. `gcp-sa-aiplatform` and `gcp-sa-aiplatform-re` are
 different principals, and the runtime one is the `-re` form.
 
-### `-re` cannot be pre-created
+### `-re` is minted by a sourceless create, not by enabling the API
 
-The command above mints **`gcp-sa-aiplatform`**, not `gcp-sa-aiplatform-re`:
+**A create with no source at all mints both service agents in ~20 seconds**,
+which is what makes a single-pass provisioning run possible:
+
+```jsonc
+// POST .../v1beta1/projects/P/locations/R/reasoningEngines
+{"displayName": "bootstrap", "spec": {"identityType": "AGENT_IDENTITY"}}
+```
+
+Measured on two fresh projects, with the middle row as the control:
+
+| State | `-re` present? |
+| :--- | :--- |
+| Fresh project, nothing enabled | No — `NOT_FOUND` |
+| `aiplatform.googleapis.com` enabled, billing linked, no engine | **No** — a grant fails `INVALID_ARGUMENT: … does not exist` |
+| After the sourceless create | **Yes** — the grant succeeds |
+
+**Enabling the API is not what mints it.** The create is. Both agents appear
+together, each already holding its default role:
 
 ```
-Service identity created: service-<NUM>@gcp-sa-aiplatform.iam.gserviceaccount.com
+roles/aiplatform.reasoningEngineServiceAgent -> service-<NUM>@gcp-sa-aiplatform-re…
+roles/aiplatform.serviceAgent               -> service-<NUM>@gcp-sa-aiplatform…
 ```
 
-There is no service name that mints the `-re` agent. `aiplatform` is the only
-one that resolves; `reasoningengine.googleapis.com` and
-`aiplatform-re.googleapis.com` both fail with
-`SERVICE_CONFIG_NOT_FOUND_OR_PERMISSION_DENIED`.
+The create requires **billing enabled** — without it the API returns
+`403 BILLING_DISABLED`, so a provisioning script must check billing before this
+step rather than after.
 
-**`gcp-sa-aiplatform-re` appears when the first Agent Runtime deploy runs.**
-On a fresh project it does not exist before that, so running
-`services identity create` and then binding to `-re` still fails with
-`does not exist` — the remedy for the `gcp-sa-aiplatform` case does not
-transfer.
+So anything that binds `-re` can run in one pass: mint, then grant. There is no
+need to deploy running code first, and no need for a two-stage apply that
+converges on a later run.
 
-This constrains ordering. Anything granting to `-re` must run **after** an
-engine has actually deployed running code, so provisioning that binds `-re` up
-front cannot be a single pass on a new project. Either deploy once and then
-apply the grants, or make the binding tolerate the principal's absence on the
-first pass and converge on a later one — but do that explicitly, never by
-masking the error.
+#### Two routes that do not work
+
+- **`gcloud beta services identity create --service=aiplatform.googleapis.com`**
+  mints `gcp-sa-aiplatform`, not the `-re` form. No service name mints `-re`:
+  `aiplatform` is the only one that resolves, and both
+  `reasoningengine.googleapis.com` and `aiplatform-re.googleapis.com` fail with
+  `SERVICE_CONFIG_NOT_FOUND_OR_PERMISSION_DENIED`.
+- **`gcloud workload-identity service-agents generate`** exists at GA and looks
+  like the intended tool. It needs `workloadidentity.googleapis.com` enabled,
+  and then **403s for a project Owner** on
+  `workloadidentity.serviceAgents.create`. Owner is the strongest role most
+  people hold on their own project, so treat this as unavailable.
 
 ### An Agent Identity is not the `-re` service agent
 
-These are two different principals with two different bootstraps, and the
-pattern that solves one does nothing for the other:
+These are two different principals. One sourceless create mints both, but they
+are not interchangeable and a grant to one does nothing for the other:
 
 | | `gcp-sa-aiplatform-re` | Agent Identity |
 | :--- | :--- | :--- |
-| Form | `service-<NUM>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` | `principal://agents.global.proj-<NUM>...` |
+| Form | `service-<NUM>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` | `principal://agents.global.org-<ORG>...` |
 | What it is | Google-managed service agent for the project | Per-engine SPIFFE identity |
-| Created by | An engine deploying **running code** | Creating an engine with `identityType: AGENT_IDENTITY` |
-| Pre-creatable | **No** | **Yes — without any source code** |
+| Scope | One per project | One per engine |
+| Created by | A sourceless create, or any deploy | The same sourceless create, with `identityType: AGENT_IDENTITY` |
+| Pre-creatable | **Yes — without any source code** | **Yes — without any source code** |
+
+Which one you need depends on the identity mode. An engine running as a
+**custom service account** needs `-re` to hold
+`roles/iam.serviceAccountTokenCreator` on that account, so it can be
+impersonated. An engine running under **Agent Identity** has no service account
+at all, so nothing needs impersonating and `-re` stays off its permission
+path entirely.
 
 **An engine can be created with no source at all**, purely to mint its
 identity:
@@ -416,6 +438,11 @@ call rather than the one you were testing.
 The same trick is how a **Cloud Run**-hosted agent gets an agent identity: mint
 it with a sourceless Agent Runtime create, grant it, and let the Cloud Run
 workload assert it. The engine exists to issue the identity, not to serve.
+
+A sourceless engine has **no `deploymentSpec`** — no image, no instances,
+nothing kept warm — so minting an identity ahead of time does not leave a
+running resource behind. That matters because anything with a real deployment
+spec defaults to `min_instances: 1`.
 
 Terraform reaches the same end differently, since its provider needs a spec: it
 creates the engine with a **placeholder source archive** — a tarball containing
@@ -454,8 +481,8 @@ binding written from the field verbatim is accepted and grants nothing.
 | `global-aiplatform.googleapis.com` does not resolve | The model endpoint value was interpolated into a regional host (§8) |
 | Agent reachable but sessions or memories are empty | Card or client built against the wrong region — resolves fine, wrong place (§8) |
 | Deploy 403s on a compute permission | Grant the named permission to `service-<PROJECT_NUMBER>@gcp-sa-aiplatform` and allow propagation |
-| `Service account service-…@gcp-sa-… does not exist` when granting | The API has not been used yet, so its service agent is absent. Create the identity first (§9) |
-| `does not exist` when granting to `gcp-sa-aiplatform-re` specifically | The `-re` agent cannot be pre-created; it appears only after the first Agent Runtime deploy |
+| `Service account service-…@gcp-sa-… does not exist` when granting | The service agent is absent. `services identity create` mints `gcp-sa-aiplatform`; only a sourceless create mints `-re` (§9) |
+| `does not exist` when granting to `gcp-sa-aiplatform-re` specifically | Enabling the API does not mint `-re`. A **sourceless create** does, in ~20s (§9) |
 | IAM script reports success, deploys still 403 | Bindings masked with `\|\| true`. Re-run without the mask and read what failed (§9) |
 
 ## Sources
