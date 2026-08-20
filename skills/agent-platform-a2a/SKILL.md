@@ -368,11 +368,66 @@ On a fresh project it does not exist before that, so running
 `does not exist` — the remedy for the `gcp-sa-aiplatform` case does not
 transfer.
 
-This constrains ordering. Anything granting to `-re` must run **after** a first
-deploy has created it, so provisioning that binds `-re` up front cannot be a
-single pass on a new project. Either deploy once and then apply the grants, or
-make the binding tolerate the principal's absence on the first pass and
-converge on a later one — but do that explicitly, never by masking the error.
+This constrains ordering. Anything granting to `-re` must run **after** an
+engine has actually deployed running code, so provisioning that binds `-re` up
+front cannot be a single pass on a new project. Either deploy once and then
+apply the grants, or make the binding tolerate the principal's absence on the
+first pass and converge on a later one — but do that explicitly, never by
+masking the error.
+
+### An Agent Identity is not the `-re` service agent
+
+These are two different principals with two different bootstraps, and the
+pattern that solves one does nothing for the other:
+
+| | `gcp-sa-aiplatform-re` | Agent Identity |
+| :--- | :--- | :--- |
+| Form | `service-<NUM>@gcp-sa-aiplatform-re.iam.gserviceaccount.com` | `principal://agents.global.proj-<NUM>...` |
+| What it is | Google-managed service agent for the project | Per-engine SPIFFE identity |
+| Created by | An engine deploying **running code** | Creating an engine with `identityType: AGENT_IDENTITY` |
+| Pre-creatable | **No** | **Yes — without any source code** |
+
+**An engine can be created with no source at all**, purely to mint its
+identity:
+
+```jsonc
+// POST .../v1beta1/projects/P/locations/R/reasoningEngines
+{"displayName": "my-agent", "spec": {"identityType": "AGENT_IDENTITY"}}
+```
+
+This returns a real engine in **~20 seconds** (a full deploy takes minutes) and
+`spec.effectiveIdentity` is populated immediately, so IAM can be granted before
+any code exists. Source is deployed to the same engine later. Two details make
+or break it:
+
+- **It requires `v1beta1`.** `agents-cli` switches API version precisely for
+  this; on `v1` the sourceless create does not behave.
+- **`identityType` must be set.** A create with only `displayName` and no spec
+  is accepted but does not give you an identity.
+
+`agents-cli`'s `setup_agent_identity` (`deploy/agent_runtime.py`) is this
+pattern, and it then grants six roles to the new principal —
+`aiplatform.user`, `serviceusage.serviceUsageConsumer`, `browser`,
+`cloudapiregistry.viewer`, `logging.logWriter`, `monitoring.metricWriter` —
+because **a fresh Agent Identity holds no roles at all**. The first failure is
+otherwise `serviceusage.serviceUsageConsumer`, which breaks *every* Google API
+call rather than the one you were testing.
+
+The same trick is how a **Cloud Run**-hosted agent gets an agent identity: mint
+it with a sourceless Agent Runtime create, grant it, and let the Cloud Run
+workload assert it. The engine exists to issue the identity, not to serve.
+
+Terraform reaches the same end differently, since its provider needs a spec: it
+creates the engine with a **placeholder source archive** — a tarball containing
+only a `Dockerfile` — and then `ignore_changes` on
+`spec[0].source_code_spec`, `container_spec` and `deployment_spec` so a later
+CI deploy of the real code is never reverted. The placeholder must use
+`source_code_spec`, not `container_spec`: the real deploy writes the former, and
+a `container_spec` placeholder is left beside it and rejected on update.
+
+**Beware `effectiveIdentity`'s form.** It reports the **`org-`** trust domain,
+while the principal the API actually authenticates is the **`proj-`** form. A
+binding written from the field verbatim is accepted and grants nothing.
 
 ## Troubleshooting index
 
