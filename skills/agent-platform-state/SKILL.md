@@ -168,6 +168,11 @@ variable, or create an engine for the agent and point at it — an engine needs 
 deployed code to hold Sessions and Memory Bank (`agent-platform-architecture`
 F15).
 
+Such an engine comes back carrying `contextSpec.memoryBankConfig` already
+populated, so Memory Bank needs no separate enabling step: creating the engine
+is the provisioning. The engine costs nothing standing, since a sourceless one
+has no `deploymentSpec`.
+
 ## Agent Platform Memory Bank
 
 ### Scope is yours to define
