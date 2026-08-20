@@ -55,6 +55,19 @@ Design decisions on this platform reduce to two choices that compose:
 
 Everything else follows.
 
+**Bootstrap does not discriminate between the identity modes.** A create with
+no packaged code (F15) mints the per-engine Agent Identity *and* the project's
+`gcp-sa-aiplatform-re` service agent, in ~20s, so either mode can be fully
+provisioned before any code exists. Choose on what the modes actually differ
+on — transport compatibility (F1, F2), whether a service account is available
+to delegate through (F3, F11), and that Agent Identity is Preview. See
+`agent-platform-a2a` §9 for the call and its measured effects.
+
+What each mode needs granted differs, though. A custom service account needs
+`-re` to hold `roles/iam.serviceAccountTokenCreator` on it, so the platform can
+impersonate it. Agent Identity has no service account, so nothing needs
+impersonating and `-re` stays off the agent's permission path.
+
 ## Forces
 
 Rules, not preferences. `⇒` means the platform gives no choice.
@@ -74,8 +87,8 @@ Rules, not preferences. `⇒` means the platform gives no choice.
 | F11 | An agent identity is a first-class IAM principal | ⇒ it can hold roles on other resources, **including on a service account** — which is what makes Architecture F possible |
 | F12 | Agent Runtime's `/api/` passthrough replaces response headers wholesale — **nothing an engine's own app sets reaches the caller** | ⇒ any protocol needing a *response* header fails there. A2UI is negotiated by echoing `X-A2A-Extensions`, so **A2UI cannot work on Agent Runtime**; the A2UI-capable host is Cloud Run |
 | F13 | Cloud Run supports Agent Identity via annotations, exposed only as **hidden alpha** flags | ⇒ a Cloud Run service can hold a SPIFFE principal **and** serve A2UI, so it is the only host that satisfies both |
-| F14 | A Cloud Run agent identity receives **no default roles** | ⇒ unlike Agent Runtime, nothing is granted implicitly; every permission the agent had as a service account must be re-granted to the new principal |
-| F15 | An engine is a resource, not a running thing: it can be created with a display name and **no packaged code**, and Sessions and Memory Bank attach to it either way | ⇒ a host that injects no engine id is not cut off from managed state — provision an engine that runs nothing and point the agent at it |
+| F14 | A Cloud Run agent identity receives **no default roles**, while an Agent Runtime one is created with `roles/aiplatform.agentDefaultAccess` bound to a project-wide `principalSet` | ⇒ on Cloud Run nothing is granted implicitly and every permission the agent had as a service account must be re-granted; on Agent Runtime a bare identity can already reach Agent Platform, which hides the difference until you move host |
+| F15 | An engine is a resource, not a running thing: it can be created with a display name and **no packaged code**, and Sessions and Memory Bank attach to it either way. Such an engine has **no `deploymentSpec`** — no image, no instances, nothing warm | ⇒ a host that injects no engine id is not cut off from managed state — provision an engine that runs nothing and point the agent at it, at no standing cost. Anything with a real deployment spec defaults to `min_instances: 1` |
 
 Verified by observation: F1, F2, F3, F4, F6, F8, F9, F10, F11, F12, F13, F14, F15. From documentation: F5, F7.
 
