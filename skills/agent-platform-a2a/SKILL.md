@@ -98,7 +98,7 @@ switch and is not what authenticates. Read the principal from the audit log.
 | Trust domain | Notes |
 | :--- | :--- |
 | `agents.global.org-<ORG_ID>.system.id.goog` | documented for projects in an organization; also what `effectiveIdentity` reports |
-| `agents.global.proj-<PROJECT_NUMBER>.system.id.goog` | observed as the authenticating principal in some projects |
+| `agents.global.proj-<PROJECT_NUMBER>.system.id.goog` | observed in some projects; **not** valid on an org-owned one, where only the `org-` form has a pool (§9) |
 | `agents.global.project-<PROJECT_NUMBER>.system.id.goog` | documented for projects without an organization |
 
 Two distinguishable failure modes:
@@ -452,9 +452,18 @@ CI deploy of the real code is never reverted. The placeholder must use
 `source_code_spec`, not `container_spec`: the real deploy writes the former, and
 a `container_spec` placeholder is left beside it and rejected on update.
 
-**Beware `effectiveIdentity`'s form.** It reports the **`org-`** trust domain,
-while the principal the API actually authenticates is the **`proj-`** form. A
-binding written from the field verbatim is accepted and grants nothing.
+**Grant `effectiveIdentity` verbatim.** On an organization-owned project the
+field reports the **`org-`** trust domain, and that is the form IAM accepts —
+it persists in the policy unchanged. The `proj-` form is refused outright:
+
+```
+INVALID_ARGUMENT: Identity Pool does not exist
+(projects/<NUM>/locations/global/workloadIdentityPools/agents.global.proj-<NUM>.system.id.goog)
+```
+
+So `agents-cli`, which grants `principal://{spec.effective_identity}`
+unmodified, is doing the right thing. Untested on a project with no
+organization, where the trust domain may differ.
 
 ## Troubleshooting index
 
@@ -471,7 +480,7 @@ binding written from the field verbatim is accepted and grants nothing.
 | 401 from Cloud Run despite `run.invoker` on the agent | Agent Identity cannot mint its own audience-bound ID token. Delegate SA (Architecture F) |
 | Metadata server returns 200 but the call still 401s | The 200 is not a usable ID token under Agent Identity |
 | `VERSION_NOT_SUPPORTED` on an A2A call | Missing `A2A-Version: 1.0` header; a missing version is read as `0.3` |
-| `Identity Pool does not exist` | Wrong Agent Identity trust domain for the project |
+| `Identity Pool does not exist` | Wrong Agent Identity trust domain. On an org-owned project grant `effectiveIdentity` verbatim — the `org-` form — not a hand-built `proj-` one (§9) |
 | Grant applied, behaviour unchanged | Inert binding — that principal form is not what authenticates |
 | Confident answer containing invented data | A sub-agent failed to resolve; `state: completed` is not evidence |
 | `Cannot connect to ... mtls.googleapis.com` / `Name or service not known` | Engine on a PSC network whose private zone answers for `mtls.googleapis.com` but holds no records — gateway attached without networking, **or networking attached without a gateway**. Clear `pscInterfaceConfig` if the gateway is not being used |
