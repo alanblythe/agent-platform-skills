@@ -7,7 +7,9 @@ description: >
   Memory Bank", "can agents share state across users", "how do I share memories
   across users", "why is my state empty in a new conversation", "what does app:
   or user: prefixed state do", "how do I list every memory in a scope", "why did
-  my tool write to the wrong scope", or when a value written by a tool is missing
+  my tool write to the wrong scope", "why is the console's Sessions page blank",
+  "why is my agent's whole run one event", "which location does
+  VertexAiSessionService take", or when a value written by a tool is missing
   on the next turn or the next instance. Names each managed service, gives its
   scope and lifetime, and maps it to the ADK client that binds to it. Use
   agent-platform-architecture for choosing a host or identity mode,
@@ -68,6 +70,9 @@ capabilities from the self-hosted ones (S6), so advice that is correct for
 | Can I list every memory in a scope? | **Yes — `retrieve(simple_retrieval_params=…)`.** But not through ADK: `search_memory` only ever sends similarity params (S10) |
 | Can a tool pick its own memory scope? | **No.** `ToolContext.add_memory` pins the session's ids — under A2A that is whichever agent called you (S16) |
 | Will Memory Bank store my text verbatim? | Only via `add_memory`. The session and event paths run LLM extraction (S11) |
+| Why is the console's Sessions page empty/blocked? | **Enable `apphub.googleapis.com`.** The sessions exist; the page will not render without it (S20) |
+| Why is my agent's trajectory one giant event? | The work happened inside a tool call. Yield events from a `BaseAgent` instead (S21) |
+| Which region does `VertexAiSessionService` take? | The **engine's**, from `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` — not `GOOGLE_CLOUD_LOCATION`, which is often `global` (S19) |
 | Where do exact, enumerable records belong? | A constant Memory Bank scope reads back in full (S10) — but neither managed service is transactional, so anything needing atomicity or ordering belongs in an external datastore |
 
 ## Three stores, three lifetimes
@@ -108,6 +113,10 @@ Rules, not preferences. `⇒` means the platform gives no choice.
 | S13 | `GOOGLE_CLOUD_AGENT_ENGINE_ID` is injected by **Agent Runtime**, not by Cloud Run | ⇒ the standard "Agent Platform Sessions if set, in-memory otherwise" factory **silently degrades** on Cloud Run: identical code, no error, ephemeral sessions ⇒ not a dead end: an engine can be created with no code and pointed at, see `agent-platform-architecture` F15 |
 | S14 | `DatabaseSessionService` needs the `db` extra (SQLAlchemy) and builds via `create_async_engine`; dialects are `sqlite`, `mysql`, `postgresql` | ⇒ an async driver is required (`postgresql+asyncpg`, `mysql+aiomysql`, `sqlite+aiosqlite`), and the dependency is not present by default |
 | S15 | SQLite and in-memory backends live inside the instance | ⇒ they do not survive multi-instance scaling ⇒ "shared across users" implies a network database or a managed service, not a file |
+| S18 | `VertexAiSessionService.__init__` does `import vertexai` — i.e. `google-cloud-aiplatform` — **inside the constructor**, not at module top | ⇒ reading the module's imports shows only `google.genai` and says nothing about the real dependency ⇒ it fails when the service is *built*, not when it is imported ⇒ any environment reaching Agent Platform Sessions inherits aiplatform's `protobuf<7.0.0` cap |
+| S19 | Agent Runtime injects `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` alongside `GOOGLE_CLOUD_AGENT_ENGINE_ID`; `GOOGLE_CLOUD_LOCATION` is the *model* endpoint and is routinely `global` | ⇒ a session service built from `GOOGLE_CLOUD_LOCATION` yields `global-aiplatform.googleapis.com`, which does not resolve ⇒ take the engine region, and fall back to `GOOGLE_CLOUD_LOCATION` only as a last resort |
+| S20 | The console's Sessions view requires **`apphub.googleapis.com`** | ⇒ without it the page refuses to render and offers only a Marketplace link, while the sessions themselves exist and read fine over the API ⇒ the data is not missing, the page is |
+| S21 | Sessions persist whatever ADK events an agent *yields*; a tool's return value is one `function_response` event | ⇒ a long run performed inside a single tool call is stored as one opaque blob ⇒ per-step visibility requires a `BaseAgent` that yields an event per step |
 
 Verified by reading the client and generated SDK types: S1, S2, S4, S6, S7, S9,
 S10, S11, S14, S16, S17. From documentation: S3 (field description), S5, S8.
@@ -172,6 +181,51 @@ Such an engine comes back carrying `contextSpec.memoryBankConfig` already
 populated, so Memory Bank needs no separate enabling step: creating the engine
 is the provisioning. The engine costs nothing standing, since a sourceless one
 has no `deploymentSpec`.
+
+### Making a trajectory readable in the console
+
+Sessions store the events an agent yields. That makes *where the work happens*
+a visibility decision, not just an architectural one:
+
+| Shape | What the session holds |
+| :--- | :--- |
+| An `LlmAgent` with a tool that does the whole job | the call, and one `function_response` carrying the entire run |
+| A `BaseAgent` that yields an event per step | every tool call and result, individually, as they happen |
+
+Both are equally durable. Only the second is legible — the console renders a
+step-by-step trajectory from it, and the first shows one blob. If the real work
+runs somewhere the ADK process cannot see (a subprocess, a remote worker),
+relay each step back and rebuild it as the ADK part it was, rather than
+returning a summary at the end:
+
+```python
+class Relay(BaseAgent):
+  async def _run_async_impl(self, ctx):
+    async for step in worker_events():          # whatever the worker reports
+      yield Event(
+          invocation_id=ctx.invocation_id, author=self.name,
+          content=types.Content(role="model", parts=[rebuild(step)]),
+      )
+```
+
+An event per step also means the failure path is visible: a traceback relayed
+this way lands in the session and is readable in the console, where a tool that
+raised leaves only a truncated result.
+
+### The dependency the session client hides
+
+`VertexAiSessionService` looks like it needs only `google.genai` — that is all
+its module imports. The `import vertexai` is **inside `__init__`** (S18), so:
+
+- reading imports to decide what a service needs gives the wrong answer;
+- the failure is `ImportError: The 'google-cloud-aiplatform' package is
+  required` raised at construction, long after the code "imported fine";
+- and every environment that touches Agent Platform Sessions therefore carries
+  `google-cloud-aiplatform`, whose `protobuf<7.0.0` cap it inherits.
+
+That last point decides packaging: a library needing `protobuf>=7` cannot live
+in the same interpreter as Agent Platform Sessions. Give it its own environment
+and relay events across the boundary.
 
 ## Agent Platform Memory Bank
 

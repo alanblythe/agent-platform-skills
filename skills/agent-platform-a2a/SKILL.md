@@ -109,6 +109,20 @@ neither the MDS nor the credential object will tell you which principal your
 calls authenticate as. `spec.effectiveIdentity` on the engine is the answer;
 everything reported from inside the container is not.
 
+**The deploy output is not evidence either.** A successful
+`agents-cli deploy --agent-identity` prints:
+
+```
+Service Account: service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com
+```
+
+on a deployment whose `spec.identityType` is `AGENT_IDENTITY` and whose
+`spec.effectiveIdentity` is a federated principal. Measured on a working deploy
+that then read a secret granted **only** to the agent `principalSet` — had it
+truly been running as `-re`, that read would have 403'd. Four things claim to
+name the identity and three of them are wrong; only `spec.effectiveIdentity` is
+load-bearing.
+
 | Trust domain | Notes |
 | :--- | :--- |
 | `agents.global.org-<ORG_ID>.system.id.goog` | documented for projects in an organization; also what `effectiveIdentity` reports |
@@ -586,6 +600,7 @@ organization, where the trust domain may differ.
 | Metadata server returns 200 but the call still 401s | The 200 is not a usable ID token under Agent Identity |
 | `VERSION_NOT_SUPPORTED` on an A2A call | Missing `A2A-Version: 1.0` header; a missing version is read as `0.3` |
 | `Identity Pool does not exist` | Wrong Agent Identity trust domain. On an org-owned project grant `effectiveIdentity` verbatim — the `org-` form — not a hand-built `proj-` one (§9) |
+| Deploy printed a `gcp-sa-aiplatform-re` service account — did `--agent-identity` fail? | No. The deploy output names `-re` regardless. Check `spec.identityType` and `spec.effectiveIdentity` (§2) |
 | Grant applied, behaviour unchanged | Inert binding — that principal form is not what authenticates |
 | Confident answer containing invented data | A sub-agent failed to resolve; `state: completed` is not evidence |
 | `Cannot connect to ... mtls.googleapis.com` / `Name or service not known` | Engine on a PSC network whose private zone answers for `mtls.googleapis.com` but holds no records — gateway attached without networking, **or networking attached without a gateway**. Clear `pscInterfaceConfig` if the gateway is not being used |
