@@ -117,6 +117,7 @@ Rules, not preferences. `⇒` means the platform gives no choice.
 | S19 | Agent Runtime injects `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION` alongside `GOOGLE_CLOUD_AGENT_ENGINE_ID`; `GOOGLE_CLOUD_LOCATION` is the *model* endpoint and is routinely `global` | ⇒ a session service built from `GOOGLE_CLOUD_LOCATION` yields `global-aiplatform.googleapis.com`, which does not resolve ⇒ take the engine region, and fall back to `GOOGLE_CLOUD_LOCATION` only as a last resort |
 | S20 | The console's Sessions view requires **`apphub.googleapis.com`** | ⇒ without it the page refuses to render and offers only a Marketplace link, while the sessions themselves exist and read fine over the API ⇒ the data is not missing, the page is |
 | S21 | Sessions persist whatever ADK events an agent *yields*; a tool's return value is one `function_response` event | ⇒ a long run performed inside a single tool call is stored as one opaque blob ⇒ per-step visibility requires a `BaseAgent` that yields an event per step |
+| S22 | Sessions are **child resources of the engine**, and an engine holding them refuses deletion: `400 FAILED_PRECONDITION … contains child resources: sessions` | ⇒ deleting an engine that has served even one request needs `?force=true` ⇒ that discards the sessions, so a trajectory worth keeping must be read out first ⇒ see `agent-platform-runtime` |
 
 Verified by reading the client and generated SDK types: S1, S2, S4, S6, S7, S9,
 S10, S11, S14, S16, S17. From documentation: S3 (field description), S5, S8.
